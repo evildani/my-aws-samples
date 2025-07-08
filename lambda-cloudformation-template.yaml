@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template with Python Lambda function'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    Description: 'Environment name (dev, staging, prod)'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+Resources:
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'lambda-execution-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # Python Lambda Function
+  PythonLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'python-lambda-${Environment}'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import cfnresponse
+          from datetime import datetime
+
+          def lambda_handler(event, context):
+              """
+              Main Lambda handler function that can be invoked directly or as a custom resource
+              """
+              print(f"Event received: {json.dumps(event)}")
+              print(f"Environment: {os.environ.get('ENVIRONMENT')}")
+              
+              # Check if this is a CloudFormation custom resource event
+              if 'RequestType' in event:
+                  return handle_cfn_event(event, context)
+              else:
+                  return handle_direct_invocation(event, context)
+
+          def handle_cfn_event(event, context):
+              """
+              Handle CloudFormation custom resource events
+              """
+              try:
+                  request_type = event['RequestType']
+                  resource_properties = event.get('ResourceProperties', {})
+                  
+                  print(f"Processing CloudFormation {request_type} request")
+                  
+                  if request_type == 'Create':
+                      result = process_cfn_create(event, resource_properties)
+                      result['PhysicalResourceId'] = context.log_stream_name
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, result)
+                  elif request_type == 'Update':
+                      result = process_cfn_update(event, resource_properties)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, result)
+                  elif request_type == 'Delete':
+                      result = process_cfn_delete(event, resource_properties)
+                      result['PhysicalResourceId'] = context.log_stream_name
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, result)
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {
+                          'Error': f'Unknown request type: {request_type}'
+                      })
+                      
+              except Exception as e:
+                  print(f"Error in handle_cfn_event: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+
+          def handle_direct_invocation(event, context):
+              """
+              Handle direct Lambda invocations (not from CloudFormation)
+              """
+              try:
+                  # Get environment variables
+                  environment = os.environ.get('ENVIRONMENT', 'dev')
+                  
+                  # Process the event
+                  result = process_event(event, environment)
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({
+                          'message': 'Lambda function executed successfully',
+                          'environment': environment,
+                          'timestamp': datetime.utcnow().isoformat(),
+                          'result': result
+                      })
+                  }
+                  
+              except Exception as e:
+                  print(f"Error in handle_direct_invocation: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({
+                          'error': str(e),
+                          'timestamp': datetime.utcnow().isoformat()
+                      })
+                  }
+
+          def process_cfn_create(event, resource_properties):
+              """
+              Process CloudFormation Create request
+              """
+              environment = os.environ.get('ENVIRONMENT', 'dev')
+              stack_name = event.get('StackId', '').split('/')[-1]
+              
+              # Create a deployment record
+              deployment_data = {
+                  'stack_name': stack_name,
+                  'environment': environment,
+                  'deployment_time': datetime.utcnow().isoformat(),
+                  'resource_properties': resource_properties,
+                  'event_type': 'cloudformation_create'
+              }
+              return {
+                  'Message': 'CloudFormation stack creation processed successfully',
+                  'Environment': environment,
+                  'StackName': stack_name,
+                  'DeploymentTime': deployment_data['deployment_time'],
+              }
+
+          def process_cfn_update(event, resource_properties):
+              """
+              Process CloudFormation Update request
+              """
+              environment = os.environ.get('ENVIRONMENT', 'dev')
+              stack_name = event.get('StackId', '').split('/')[-1]
+              
+              # Create an update record
+              update_data = {
+                  'stack_name': stack_name,
+                  'environment': environment,
+                  'update_time': datetime.utcnow().isoformat(),
+                  'resource_properties': resource_properties,
+                  'event_type': 'cloudformation_update'
+              }
+              return {
+                  'Message': 'CloudFormation stack update processed successfully',
+                  'Environment': environment,
+                  'StackName': stack_name,
+                  'UpdateTime': update_data['update_time'],
+              }
+
+          def process_cfn_delete(event, resource_properties):
+              """
+              Process CloudFormation Delete request
+              """
+              environment = os.environ.get('ENVIRONMENT', 'dev')
+              stack_name = event.get('StackId', '').split('/')[-1]
+              
+              # Create a deletion record
+              deletion_data = {
+                  'stack_name': stack_name,
+                  'environment': environment,
+                  'deletion_time': datetime.utcnow().isoformat(),
+                  'resource_properties': resource_properties,
+                  'event_type': 'cloudformation_delete'
+              }
+              return {
+                  'Message': 'CloudFormation stack deletion processed successfully',
+                  'Environment': environment,
+                  'StackName': stack_name,
+                  'DeletionTime': deletion_data['deletion_time'],
+              }
+
+          def process_event(event, environment):
+              """
+              Process regular Lambda invocation events
+              """
+              result = {
+                  'event_type': event.get('type', 'unknown'),
+                  'data_processed': False,
+              }
+              return result
+
+
+  # CloudWatch Log Group
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${PythonLambdaFunction}'
+      RetentionInDays: 14
+
+  # Custom Resource to invoke Lambda function
+  LambdaInvocation:
+    Type: Custom::LambdaInvocation
+    Properties:
+      ServiceToken: !GetAtt PythonLambdaFunction.Arn
+      Environment: !Ref Environment
+      Payload: |
+        {
+          "type": "cloudformation_deployment",
+          "data": {
+            "stack_name": "${AWS::StackName}",
+            "environment": "${Environment}",
+            "deployment_time": "${AWS::StackId}"
+          }
+        }
+
+  #
+
+Outputs:
+  LambdaFunctionArn:
+    Description: 'ARN of the Python Lambda function'
+    Value: !GetAtt PythonLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunctionArn'
+  
+  LambdaFunctionName:
+    Description: 'Name of the Python Lambda function'
+    Value: !Ref PythonLambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunctionName'
+  LambdaExecutionRoleArn:
+    Description: 'ARN of the Lambda execution role'
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaExecutionRoleArn' 
